@@ -1,21 +1,32 @@
-// home.jsx
-import { useRouter } from "expo-router";
+// app/home.jsx
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import NetInfo from "@react-native-community/netinfo";
+import { useLocalSearchParams, useRouter } from "expo-router";
 import { signOut } from "firebase/auth";
-import { onValue, ref, set } from "firebase/database";
+import { onValue, ref, set, update } from "firebase/database";
 import { useEffect, useRef, useState } from "react";
 import {
   Animated,
   Easing,
   Image,
+  ImageBackground,
   Modal,
   SafeAreaView,
+  ScrollView,
+  StatusBar,
   Text,
   TouchableOpacity,
   View,
 } from "react-native";
 import { auth, db } from "./Firebase";
+import {
+  getLocalUser,
+  getUnsyncedUsers,
+  initDB,
+  markUserSynced,
+  saveLocalUser,
+} from "./LocalDB";
 
-// Map your local images to keys
 const avatarMap = {
   pp1: require("../assets/pp1.png"),
   pp2: require("../assets/pp2.png"),
@@ -24,85 +35,153 @@ const avatarMap = {
   pp5: require("../assets/pp5.png"),
 };
 
+// Static map for user-selectable borders (1 through 8 only!)
+const borderMap = {
+  1: require("../assets/border1.png"),
+  2: require("../assets/border2.png"),
+  3: require("../assets/border3.png"),
+  4: require("../assets/border4.png"),
+  5: require("../assets/border5.png"),
+  6: require("../assets/border6.png"),
+  7: require("../assets/border7.png"),
+  8: require("../assets/border8.png"),
+};
+
 const Home = () => {
   const router = useRouter();
-  const floatAnim = useRef(new Animated.Value(0)).current;
+  const params = useLocalSearchParams();
 
+  // Animations
+  const floatAnim = useRef(new Animated.Value(0)).current;
+  const fadeAnim = useRef(new Animated.Value(0)).current;
+
+  // Modals
   const [profileModalVisible, setProfileModalVisible] = useState(false);
   const [avatarModalVisible, setAvatarModalVisible] = useState(false);
+  const [borderModalVisible, setBorderModalVisible] = useState(false);
 
+  // User Data
   const [userEmail, setUserEmail] = useState("");
   const [userAvatar, setUserAvatar] = useState(null);
+  const [userBorder, setUserBorder] = useState(1);
   const [fullName, setFullName] = useState("");
   const [score, setScore] = useState(0);
+  const [isOnline, setIsOnline] = useState(true);
+
+  const activeUid = auth.currentUser ? auth.currentUser.uid : params.uid;
 
   useEffect(() => {
-    let unsubscribe;
+    initDB();
+    let localSavedPassword = "";
 
-    // Set up the real-time listener for user data
+    if (activeUid) {
+      const localData = getLocalUser(activeUid);
+      if (localData) {
+        setUserEmail(localData.email);
+        setUserAvatar(localData.avatarId);
+        setFullName(localData.fullName);
+        setScore(localData.score);
+        localSavedPassword = localData.password;
+      }
+
+      // Load locally saved custom border (if offline/reloading)
+      AsyncStorage.getItem(`border_${activeUid}`).then((savedBorder) => {
+        if (savedBorder) setUserBorder(parseInt(savedBorder));
+      });
+    }
+
+    let unsubscribeFirebase;
+
+    const unsubscribeNetInfo = NetInfo.addEventListener((state) => {
+      setIsOnline(state.isConnected);
+      if (state.isConnected && activeUid) {
+        syncLocalToFirebase(activeUid);
+      }
+    });
+
     const setupRealtimeListener = () => {
-      const user = auth.currentUser;
-      if (user) {
-        setUserEmail(user.email);
+      if (auth.currentUser) {
+        const userRef = ref(db, `users/${auth.currentUser.uid}`);
+        unsubscribeFirebase = onValue(userRef, (snapshot) => {
+          if (snapshot.exists()) {
+            const data = snapshot.val();
+            setUserAvatar(data.avatarId || userAvatar);
+            setUserBorder(data.borderId || userBorder);
+            setFullName(data.fullName || fullName);
+            setScore(data.score !== undefined ? data.score : score);
 
-        const userRef = ref(db, `users/${user.uid}`);
-
-        // onValue listens for changes continuously
-        unsubscribe = onValue(
-          userRef,
-          (snapshot) => {
-            if (snapshot.exists()) {
-              const data = snapshot.val();
-
-              if (data.avatarId) {
-                setUserAvatar(data.avatarId);
-              }
-              if (data.fullName) {
-                setFullName(data.fullName);
-              }
-              if (data.score !== undefined) {
-                setScore(data.score); // Instantly updates when score changes
-              }
-            }
-          },
-          (error) => {
-            console.error("Error with real-time fetch:", error);
-          },
-        );
+            saveLocalUser(
+              auth.currentUser.uid,
+              auth.currentUser.email,
+              localSavedPassword,
+              data.fullName || fullName,
+              data.avatarId || userAvatar,
+              data.score !== undefined ? data.score : score,
+              0,
+            );
+          }
+        });
       }
     };
 
     setupRealtimeListener();
 
-    // Floating animation for logo
+    // UI Animations
+    Animated.timing(fadeAnim, {
+      toValue: 1,
+      duration: 1000,
+      useNativeDriver: true,
+    }).start();
+
     Animated.loop(
       Animated.sequence([
         Animated.timing(floatAnim, {
-          toValue: -10,
-          duration: 2000,
-          easing: Easing.easeInOut,
+          toValue: -15,
+          duration: 2500,
+          easing: Easing.inOut(Easing.sin),
           useNativeDriver: true,
         }),
         Animated.timing(floatAnim, {
           toValue: 0,
-          duration: 2000,
-          easing: Easing.easeInOut,
+          duration: 2500,
+          easing: Easing.inOut(Easing.sin),
           useNativeDriver: true,
         }),
       ]),
     ).start();
 
-    // Cleanup function: stop listening when component unmounts
     return () => {
-      if (unsubscribe) {
-        unsubscribe();
-      }
+      if (unsubscribeFirebase) unsubscribeFirebase();
+      if (unsubscribeNetInfo) unsubscribeNetInfo();
     };
   }, []);
 
+  const syncLocalToFirebase = async (uid) => {
+    try {
+      const unsyncedUsers = getUnsyncedUsers();
+      for (const unsyncedUser of unsyncedUsers) {
+        if (unsyncedUser.uid === uid) {
+          const userRef = ref(db, `users/${uid}`);
+          await update(userRef, {
+            avatarId: unsyncedUser.avatarId,
+            fullName: unsyncedUser.fullName,
+            score: unsyncedUser.score,
+          });
+          markUserSynced(uid);
+        }
+      }
+    } catch (error) {
+      console.error("Error syncing to Firebase:", error);
+    }
+  };
+
   const handleLogout = async () => {
     try {
-      await signOut(auth);
+      await AsyncStorage.removeItem("active_uid");
+
+      if (auth.currentUser) {
+        await signOut(auth);
+      }
       router.replace("/");
     } catch (error) {
       console.error("Logout error:", error);
@@ -110,65 +189,77 @@ const Home = () => {
   };
 
   const handleSelectAvatar = async (avatarId) => {
-    const user = auth.currentUser;
-    if (!user) return;
+    if (!activeUid) return;
 
     try {
       setUserAvatar(avatarId);
       setAvatarModalVisible(false);
 
-      const userRef = ref(db, `users/${user.uid}/avatarId`);
-      await set(userRef, avatarId);
+      const localData = getLocalUser(activeUid);
+      const savedPass = localData ? localData.password : "";
+
+      if (isOnline && auth.currentUser) {
+        const userRef = ref(db, `users/${activeUid}/avatarId`);
+        await set(userRef, avatarId);
+        saveLocalUser(
+          activeUid,
+          userEmail,
+          savedPass,
+          fullName,
+          avatarId,
+          score,
+          0,
+        );
+      } else {
+        saveLocalUser(
+          activeUid,
+          userEmail,
+          savedPass,
+          fullName,
+          avatarId,
+          score,
+          1,
+        );
+        alert("Avatar saved locally! Will update online when you reconnect.");
+      }
     } catch (error) {
       console.error("Error saving avatar:", error);
     }
   };
 
-  const getUsername = () => {
-    if (userEmail) {
-      return userEmail.split("@")[0];
+  const handleSelectBorder = async (borderId) => {
+    if (!activeUid) return;
+
+    try {
+      setUserBorder(borderId);
+      setBorderModalVisible(false);
+
+      await AsyncStorage.setItem(`border_${activeUid}`, borderId.toString());
+
+      if (isOnline && auth.currentUser) {
+        const userRef = ref(db, `users/${activeUid}/borderId`);
+        await set(userRef, borderId);
+      } else {
+        alert("Border saved locally! Will update online when you reconnect.");
+      }
+    } catch (error) {
+      console.error("Error saving border:", error);
     }
-    return "User";
   };
 
-  const getUserInitials = () => {
-    return getUsername().charAt(0).toUpperCase();
-  };
+  const getUsername = () => (userEmail ? userEmail.split("@")[0] : "User");
+  const getUserInitials = () => getUsername().charAt(0).toUpperCase();
 
-  // Renders the profile picture with the expanded dynamic borders
-  const renderProfilePicture = (sizeClasses, textClasses) => {
-    let borderSource;
-
-    // Check score from highest to lowest
-    if (score >= 55) {
-      borderSource = require("../assets/border12.png");
-    } else if (score >= 50) {
-      borderSource = require("../assets/border11.png");
-    } else if (score >= 45) {
-      borderSource = require("../assets/border10.png");
-    } else if (score >= 40) {
-      borderSource = require("../assets/border9.png");
-    } else if (score >= 35) {
-      borderSource = require("../assets/border8.png");
-    } else if (score >= 30) {
-      borderSource = require("../assets/border7.png");
-    } else if (score >= 25) {
-      borderSource = require("../assets/border6.png");
-    } else if (score >= 20) {
-      borderSource = require("../assets/border5.png");
-    } else if (score >= 15) {
-      borderSource = require("../assets/border4.png");
-    } else if (score >= 10) {
-      borderSource = require("../assets/border3.png");
-    } else if (score >= 5) {
-      borderSource = require("../assets/border2.png");
-    } else {
-      borderSource = require("../assets/border1.png"); // 0 to 4 points
-    }
+  const renderProfilePicture = (
+    sizeClasses,
+    textClasses,
+    overrideBorderId = null,
+  ) => {
+    let borderSource =
+      borderMap[overrideBorderId || userBorder] || borderMap[1];
 
     return (
       <View className={`${sizeClasses} justify-center items-center`}>
-        {/* Inner Avatar or Initials */}
         <View className="w-full h-full rounded-full overflow-hidden absolute">
           {userAvatar && avatarMap[userAvatar] ? (
             <Image
@@ -177,15 +268,13 @@ const Home = () => {
               resizeMode="cover"
             />
           ) : (
-            <View className="w-full h-full bg-gradient-to-b from-green-400 to-blue-500 justify-center items-center">
-              <Text className={`text-white font-bold ${textClasses}`}>
+            <View className="w-full h-full bg-blue-900 justify-center items-center">
+              <Text className={`text-yellow-500 font-bold ${textClasses}`}>
                 {getUserInitials()}
               </Text>
             </View>
           )}
         </View>
-
-        {/* Dynamic Image Border Overlay */}
         <Image
           source={borderSource}
           className="absolute w-[130%] h-[130%]"
@@ -196,35 +285,42 @@ const Home = () => {
   };
 
   return (
-    <SafeAreaView className="flex-1 bg-blue-950">
-      {/* Background Image */}
-      <View className="absolute bottom-[100px] left-0">
-        <Image
-          source={require("../assets/bg.png")}
-          className="w-[500px] h-[500px] opacity-15"
-          resizeMode="contain"
+    <SafeAreaView className="flex-1 bg-blue-800">
+      <StatusBar barStyle="light-content" />
+
+      {/* --- BACKGROUND IMAGE LAYER --- */}
+      <View className="absolute inset-0 opacity-35">
+        <ImageBackground
+          source={require("../assets/bg3.png")}
+          className="flex-1"
+          resizeMode="cover"
         />
+        <View className="absolute inset-0 bg-black/50" />
       </View>
 
-      {/* Avatar Selection Modal */}
+      {/* --- MODALS OMITTED FOR BREVITY, NO CHANGES THERE --- */}
       <Modal
         transparent={true}
         visible={avatarModalVisible}
         animationType="slide"
         onRequestClose={() => setAvatarModalVisible(false)}
       >
-        <View className="flex-1 bg-black/70 justify-center items-center p-6">
-          <View className="bg-blue-900 w-full rounded-3xl p-6 border-2 border-blue-400">
-            <Text className="text-white text-xl font-bold text-center mb-6">
-              Select an Avatar
+        <View className="flex-1 bg-black/80 justify-center items-center p-6">
+          <View className="bg-blue-950/90 w-full max-w-[400px] rounded-3xl p-6 border-2 border-yellow-500 shadow-2xl shadow-yellow-500/20">
+            <Text className="text-yellow-500 text-[12px] font-bold tracking-[4px] uppercase mb-6 text-center">
+              SELECT LAB AVATAR
             </Text>
-
-            <View className="flex-row flex-wrap justify-center gap-4">
+            <View className="flex-row flex-wrap justify-center gap-6 mb-8">
               {Object.keys(avatarMap).map((avatarKey) => (
                 <TouchableOpacity
                   key={avatarKey}
                   onPress={() => handleSelectAvatar(avatarKey)}
-                  className={`border-4 rounded-full ${userAvatar === avatarKey ? "border-green-400" : "border-transparent"}`}
+                  className={`border-4 rounded-full p-1 ${
+                    userAvatar === avatarKey
+                      ? "border-yellow-500 bg-yellow-500/20"
+                      : "border-blue-800"
+                  }`}
+                  activeOpacity={0.7}
                 >
                   <Image
                     source={avatarMap[avatarKey]}
@@ -233,12 +329,11 @@ const Home = () => {
                 </TouchableOpacity>
               ))}
             </View>
-
             <TouchableOpacity
-              className="mt-8 bg-blue-600/70 py-3 rounded-full"
+              className="bg-blue-800 border-2 border-blue-500 py-4 rounded-2xl items-center"
               onPress={() => setAvatarModalVisible(false)}
             >
-              <Text className="text-white text-center font-semibold">
+              <Text className="text-blue-200 font-bold tracking-wider text-sm uppercase">
                 Cancel
               </Text>
             </TouchableOpacity>
@@ -246,7 +341,47 @@ const Home = () => {
         </View>
       </Modal>
 
-      {/* Profile Modal */}
+      <Modal
+        transparent={true}
+        visible={borderModalVisible}
+        animationType="slide"
+        onRequestClose={() => setBorderModalVisible(false)}
+      >
+        <View className="flex-1 bg-black/80 justify-center items-center p-6">
+          <View className="bg-blue-950/90 w-full max-w-[400px] rounded-3xl p-6 border-2 border-yellow-500 shadow-2xl shadow-yellow-500/20 max-h-[80%]">
+            <Text className="text-yellow-500 text-[12px] font-bold tracking-[4px] uppercase mb-6 text-center">
+              CHOOSE BORDER
+            </Text>
+            <ScrollView showsVerticalScrollIndicator={false}>
+              <View className="flex-row flex-wrap justify-center gap-6 mb-8">
+                {Object.keys(borderMap).map((borderKey) => (
+                  <TouchableOpacity
+                    key={borderKey}
+                    onPress={() => handleSelectBorder(borderKey)}
+                    className={`rounded-full p-2 ${
+                      userBorder.toString() === borderKey.toString()
+                        ? "bg-yellow-500/20"
+                        : ""
+                    }`}
+                    activeOpacity={0.7}
+                  >
+                    {renderProfilePicture("w-16 h-16", "text-2xl", borderKey)}
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </ScrollView>
+            <TouchableOpacity
+              className="bg-blue-800 border-2 border-blue-500 py-4 rounded-2xl items-center mt-2"
+              onPress={() => setBorderModalVisible(false)}
+            >
+              <Text className="text-blue-200 font-bold tracking-wider text-sm uppercase">
+                Cancel
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
       <Modal
         transparent={true}
         visible={profileModalVisible}
@@ -254,126 +389,183 @@ const Home = () => {
         onRequestClose={() => setProfileModalVisible(false)}
       >
         <TouchableOpacity
-          className="flex-1"
+          className="flex-1 bg-black/40"
           activeOpacity={1}
           onPress={() => setProfileModalVisible(false)}
         >
-          <View className="flex-1 bg-black/50">
-            <View className="absolute top-20 right-6 w-56 bg-blue-900 rounded-2xl border-2 border-blue-400 overflow-hidden">
-              {/* Profile Info */}
-              <View className="p-4 border-b border-blue-400/30">
-                <View className="flex-row items-center">
-                  <TouchableOpacity
-                    onPress={() => {
-                      setProfileModalVisible(false);
-                      setAvatarModalVisible(true);
-                    }}
-                  >
-                    {renderProfilePicture("w-12 h-12", "text-xl")}
-                  </TouchableOpacity>
-
-                  <View className="ml-4 flex-1">
-                    <Text className="text-white font-bold text-base">
-                      {getUsername()}
-                    </Text>
-                    <Text className="text-blue-200 font-medium text-sm mt-0.5">
-                      {fullName || "No Name"}
-                    </Text>
-                    <Text className="text-blue-300 text-xs mt-0.5">
-                      {userEmail || "No email"}
-                    </Text>
-                  </View>
-                </View>
-              </View>
-
-              {/* Menu Items */}
-              <View>
+          <View className="absolute top-24 right-6 w-64 bg-blue-950 rounded-2xl border-2 border-yellow-500 overflow-hidden shadow-2xl shadow-yellow-500/20">
+            <View className="p-4 border-b border-blue-800">
+              <View className="flex-row items-center">
                 <TouchableOpacity
-                  className="px-4 py-3 border-b border-blue-400/30"
                   onPress={() => {
                     setProfileModalVisible(false);
                     setAvatarModalVisible(true);
                   }}
                 >
-                  <Text className="text-white">Choose Avatar</Text>
+                  {renderProfilePicture("w-14 h-14", "text-xl")}
                 </TouchableOpacity>
-
-                <TouchableOpacity
-                  className="px-4 py-3 border-b border-blue-400/30"
-                  onPress={() => {
-                    setProfileModalVisible(false);
-                    // Achievements option
-                  }}
-                >
-                  <Text className="text-white">Achievements</Text>
-                </TouchableOpacity>
-
-                {/* Logout Button */}
-                <TouchableOpacity className="px-4 py-3" onPress={handleLogout}>
-                  <Text className="text-red-400 font-semibold">Logout</Text>
-                </TouchableOpacity>
+                <View className="ml-4 flex-1">
+                  <Text
+                    className="text-yellow-500 font-bold text-lg"
+                    numberOfLines={1}
+                  >
+                    {getUsername()}
+                  </Text>
+                  <Text
+                    className="text-blue-300 text-[10px] mt-1 tracking-wider uppercase"
+                    numberOfLines={1}
+                  >
+                    {fullName || "No Name Set"}
+                  </Text>
+                </View>
               </View>
+            </View>
+            <View className="bg-blue-900/50">
+              <TouchableOpacity
+                className="px-5 py-4 border-b border-blue-800 flex-row items-center justify-between"
+                onPress={() => {
+                  setProfileModalVisible(false);
+                  setAvatarModalVisible(true);
+                }}
+              >
+                <Text className="text-blue-100 font-bold tracking-widest text-xs uppercase">
+                  Choose Avatar
+                </Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                className="px-5 py-4 border-b border-blue-800 flex-row items-center justify-between"
+                onPress={() => {
+                  setProfileModalVisible(false);
+                  setBorderModalVisible(true);
+                }}
+              >
+                <Text className="text-blue-100 font-bold tracking-widest text-xs uppercase">
+                  Choose Border
+                </Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity className="px-5 py-4 border-b border-blue-800 flex-row items-center justify-between">
+                <Text className="text-blue-100 font-bold tracking-widest text-xs uppercase">
+                  Profile
+                </Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity className="px-5 py-4 border-b border-blue-800 flex-row items-center justify-between">
+                <Text className="text-blue-100 font-bold tracking-widest text-xs uppercase">
+                  Achievements
+                </Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                className="px-5 py-4 bg-blue-950"
+                onPress={handleLogout}
+              >
+                <Text className="text-yellow-500 font-black tracking-widest text-xs uppercase text-center">
+                  Log Out
+                </Text>
+              </TouchableOpacity>
             </View>
           </View>
         </TouchableOpacity>
       </Modal>
 
-      {/* Main Content */}
-      <View className="flex-1">
-        {/* Header with Profile Picture */}
-        <View className="flex-row justify-end px-6 pt-4">
-          <TouchableOpacity
-            onPress={() => setProfileModalVisible(true)}
-            className="mt-6 justify-center items-center"
-            activeOpacity={0.8}
-          >
-            {renderProfilePicture("w-14 h-14", "text-2xl")}
-          </TouchableOpacity>
-        </View>
+      {/* --- MAIN DASHBOARD CONTENT --- */}
+      {/* ANTI-CRASH FIX: Removed className from Animated.View */}
+      <Animated.View style={{ opacity: fadeAnim, flex: 1, width: "100%" }}>
+        {/* Wrapper View handles Tailwind */}
+        <View className="flex-1 w-full">
+          <View className="absolute top-1/4 -right-20 w-72 h-72 bg-blue-500/10 rounded-full blur-3xl" />
 
-        <View className="flex-1 mt-10 px-6 left-5">
-          <Animated.Image
-            source={require("../assets/logo.png")}
-            className="w-[300px] h-[60px] mb-8"
-            resizeMode="contain"
-            style={{
-              transform: [{ translateY: floatAnim }],
-            }}
-          />
-          <Text className="text-white -tracking-tighter text-center text-lg ">
-            Genetics Learning Game
-          </Text>
-        </View>
+          {/* --- TOP BAR (WELCOME & AVATAR) --- */}
+          <View className="flex-row justify-between items-center px-8 pt-11">
+            <View className="flex-1 pr-4">
+              <Text className="text-blue-200 text-[10px] font-bold tracking-[3px] uppercase mb-1">
+                Welcome,
+              </Text>
+              <Text
+                className="text-yellow-500 font-black text-2xl uppercase tracking-wider"
+                numberOfLines={1}
+              >
+                {getUsername()}
+              </Text>
+            </View>
 
-        <View className="w-full px-6 mb-8">
-          <TouchableOpacity
-            className="w-full bg-green-600/70 rounded-full py-4 mb-4 shadow-lg shadow-green-500/50 border-2 border-green-500"
-            activeOpacity={0.8}
-          >
-            <Text className="text-white text-center font-semibold text-lg">
-              Start Quiz
+            <TouchableOpacity
+              onPress={() => setProfileModalVisible(true)}
+              className="justify-center items-center shadow-lg shadow-yellow-500/20"
+              activeOpacity={0.8}
+            >
+              {renderProfilePicture("w-16 h-16", "text-2xl")}
+            </TouchableOpacity>
+          </View>
+
+          <View className="flex-1 justify-center items-center px-8 pb-10">
+            {/* Logo */}
+            {/* ANTI-CRASH FIX: Removed className from Animated.Image */}
+            <Animated.View
+              style={{
+                transform: [{ translateY: floatAnim }],
+                width: "100%",
+                alignItems: "center",
+              }}
+            >
+              {/* Image handles the styling natively */}
+              <Image
+                source={require("../assets/logo.png")}
+                className="w-full h-32 mb-4 mt-6"
+                resizeMode="contain"
+              />
+            </Animated.View>
+
+            <Text className="text-blue-300 tracking-[6px] text-center text-[10px] font-bold uppercase mb-12 mt-2">
+              Genetics Learning System
             </Text>
-          </TouchableOpacity>
 
-          <TouchableOpacity
-            className="w-full bg-yellow-600/70 rounded-full py-4 mb-4 shadow-lg shadow-yellow-500/50 border-2 border-yellow-500"
-            activeOpacity={0.8}
-          >
-            <Text className="text-white text-center font-semibold text-lg">
-              Review Lessons
-            </Text>
-          </TouchableOpacity>
+            <View className="w-full max-w-[450px]">
+              {/* Button 1: Start Quiz (Yellow) */}
+              <TouchableOpacity activeOpacity={0.8} className="mb-5">
+                <View
+                  className="bg-yellow-500 rounded-2xl py-4 items-center shadow-2xl shadow-yellow-500/30"
+                  style={{ borderBottomWidth: 5, borderBottomColor: "#a16207" }}
+                >
+                  <Text className="text-[#020617] font-black text-xl tracking-widest uppercase">
+                    Start Quiz
+                  </Text>
+                </View>
+              </TouchableOpacity>
 
-          <TouchableOpacity
-            className="w-full bg-blue-600/70 rounded-full py-4 shadow-lg mb-10 shadow-blue-500/50 border-2 border-blue-500"
-            activeOpacity={0.8}
-          >
-            <Text className="text-white text-center font-semibold text-lg ">
-              About
-            </Text>
-          </TouchableOpacity>
+              {/* Button 2: Review Lessons (Blue) */}
+              <TouchableOpacity
+                onPress={() => router.push("/lessons")}
+                activeOpacity={0.8}
+                className="mb-5"
+              >
+                <View
+                  className="bg-blue-600 rounded-2xl py-4 items-center shadow-2xl shadow-blue-600/30"
+                  style={{ borderBottomWidth: 5, borderBottomColor: "#1e3a8a" }}
+                >
+                  <Text className="text-white font-black text-xl tracking-widest uppercase">
+                    Review Lessons
+                  </Text>
+                </View>
+              </TouchableOpacity>
+
+              {/* Button 3: About (Hollow Yellow) */}
+              <TouchableOpacity activeOpacity={0.8} className="mb-5 w-full">
+                <View
+                  className="bg-blue-950 border-2 border-yellow-500 rounded-2xl py-4 items-center justify-center w-full"
+                  style={{ borderBottomWidth: 5, borderBottomColor: "#ca8a04" }}
+                >
+                  <Text className="text-yellow-500 font-black text-md tracking-widest uppercase px-2 text-center">
+                    ABOUT
+                  </Text>
+                </View>
+              </TouchableOpacity>
+            </View>
+          </View>
         </View>
-      </View>
+      </Animated.View>
     </SafeAreaView>
   );
 };
