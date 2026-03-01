@@ -1,4 +1,3 @@
-// app/sign.jsx
 import NetInfo from "@react-native-community/netinfo";
 import { useRouter } from "expo-router";
 import { createUserWithEmailAndPassword } from "firebase/auth";
@@ -76,7 +75,6 @@ const Sign = () => {
   }, [floatAnim]);
 
   const handleSignUpPress = async () => {
-    // Removed confirmPassword from the check
     if (!fullName || !username || !password) {
       Alert.alert(
         "Access Denied",
@@ -121,17 +119,10 @@ const Sign = () => {
         saveLocalUser(user.uid, email, password, fullName, userAvatar, 0, 0);
       } catch (sqliteError) {
         console.error("SQLite failed:", sqliteError);
-        Alert.alert(
-          "Warning",
-          "Account registered online, but failed to save offline backup.",
-        );
-        router.back();
-        return;
       }
 
-      Alert.alert("Success", "Account generated successfully!", [
-        { text: "ENTER", onPress: () => router.back() },
-      ]);
+      // --- DIRECT ROUTE TO HOME (REMOVED ALERT) ---
+      router.replace({ pathname: "/home", params: { uid: user.uid } });
     } catch (error) {
       let errorMessage = "An error occurred during sign up";
       if (error.code === "auth/email-already-in-use")

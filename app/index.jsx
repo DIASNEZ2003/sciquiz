@@ -1,5 +1,5 @@
 // app/index.jsx
-import AsyncStorage from "@react-native-async-storage/async-storage"; // <-- Added this!
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import NetInfo from "@react-native-community/netinfo";
 import { useRouter } from "expo-router";
 import { onAuthStateChanged, signInWithEmailAndPassword } from "firebase/auth";
@@ -20,7 +20,12 @@ import {
   View,
 } from "react-native";
 import { auth, db } from "./Firebase";
-import { getLocalUserByCredentials, initDB, saveLocalUser } from "./LocalDB";
+import {
+  getLocalUser,
+  getLocalUserByCredentials,
+  initDB,
+  saveLocalUser,
+} from "./LocalDB";
 
 const { width, height } = Dimensions.get("window");
 
@@ -47,8 +52,15 @@ const Index = () => {
         const offlineUid = await AsyncStorage.getItem("active_uid");
 
         if (offlineUid) {
+          // Check role to route properly (cached during previous online login)
+          const savedRole = await AsyncStorage.getItem(`role_${offlineUid}`);
+          const localUser = getLocalUser(offlineUid);
+          const isLocalAdmin =
+            savedRole === "admin" || localUser?.role === "admin";
+          const route = isLocalAdmin ? "/homeadmin" : "/home";
+
           setTimeout(() => {
-            router.replace({ pathname: "/home", params: { uid: offlineUid } });
+            router.replace({ pathname: route, params: { uid: offlineUid } });
           }, 150);
           return; // Stop here if offline session exists
         }
@@ -56,9 +68,23 @@ const Index = () => {
         // 2. If no offline session, check Firebase (Online Session)
         onAuthStateChanged(auth, async (user) => {
           if (user) {
-            await AsyncStorage.setItem("active_uid", user.uid); // Sync Firebase to our local storage
+            await AsyncStorage.setItem("active_uid", user.uid);
+
+            // Check Firebase to see if they are an admin
+            const snapshot = await get(ref(db, "users/" + user.uid));
+            let route = "/home";
+
+            if (snapshot.exists()) {
+              const userData = snapshot.val();
+              const role = userData.role || "student";
+              await AsyncStorage.setItem(`role_${user.uid}`, role); // Cache role for offline
+              if (role === "admin") {
+                route = "/homeadmin";
+              }
+            }
+
             setTimeout(() => {
-              router.replace({ pathname: "/home", params: { uid: user.uid } });
+              router.replace({ pathname: route, params: { uid: user.uid } });
             }, 150);
           } else {
             // 3. No sessions found anywhere? Fade in the Login Screen!
@@ -142,20 +168,25 @@ const Index = () => {
         const snapshot = await get(ref(db, "users/" + user.uid));
         let fullName = "",
           avatarId = null,
-          score = 0;
+          score = 0,
+          role = "student";
 
         if (snapshot.exists()) {
           const userData = snapshot.val();
           fullName = userData.fullName || "";
           avatarId = userData.avatarId || null;
           score = userData.score || 0;
+          role = userData.role || "student"; // Identify Admin
         }
 
+        // Save Local Session Details
         saveLocalUser(user.uid, email, password, fullName, avatarId, score, 0);
-
-        // Save Local Session Token!
         await AsyncStorage.setItem("active_uid", user.uid);
-        router.replace({ pathname: "/home", params: { uid: user.uid } });
+        await AsyncStorage.setItem(`role_${user.uid}`, role); // Cache role for Offline
+
+        // Route based on Role
+        const route = role === "admin" ? "/homeadmin" : "/home";
+        router.replace({ pathname: route, params: { uid: user.uid } });
       } else {
         // --- OFFLINE LOGIN ---
         const localUser = getLocalUserByCredentials(email, password);
@@ -165,7 +196,14 @@ const Index = () => {
 
           // Save Local Session Token!
           await AsyncStorage.setItem("active_uid", localUser.uid);
-          router.replace({ pathname: "/home", params: { uid: localUser.uid } });
+
+          // Check role from AsyncStorage (cached during previous online login)
+          const savedRole = await AsyncStorage.getItem(`role_${localUser.uid}`);
+          const isLocalAdmin =
+            savedRole === "admin" || localUser.role === "admin";
+          const route = isLocalAdmin ? "/homeadmin" : "/home";
+
+          router.replace({ pathname: route, params: { uid: localUser.uid } });
         } else {
           Alert.alert(
             "Connection Error",
@@ -283,7 +321,7 @@ const Index = () => {
           <View className="flex-row items-center justify-between mt-12 px-2">
             <View className="h-[1px] flex-1 bg-white/10" />
             <Text className="text-slate-300 text-[9px] font-bold uppercase mx-4 tracking-[2px]">
-              QuizApp v 0.01
+              QuizApp v 1.0.0
             </Text>
             <View className="h-[1px] flex-1 bg-white/10" />
           </View>
