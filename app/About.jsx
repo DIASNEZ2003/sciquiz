@@ -1,14 +1,14 @@
 import { Ionicons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import {
-    Image,
-    ImageBackground,
-    SafeAreaView,
-    ScrollView,
-    StatusBar,
-    Text,
-    TouchableOpacity,
-    View,
+  Image,
+  ImageBackground,
+  SafeAreaView,
+  ScrollView,
+  StatusBar,
+  Text,
+  TouchableOpacity,
+  View,
 } from "react-native";
 
 const About = () => {
@@ -203,10 +203,15 @@ const About = () => {
               who handled the technical design, programming, and app
               functionality.
             </Text>
-            <View className="bg-blue-900/40 p-4 rounded-xl border border-blue-500/20">
-              <Text className="text-blue-50 font-medium leading-6">
-                <Text className="font-bold text-yellow-500">Developer: </Text>
-                Kuya Alvin & Friends
+            <View className="ml-2 mb-6 bg-blue-900/40 p-4 rounded-xl border border-blue-500/20">
+              <Text className="text-blue-100 font-medium leading-7">
+                • Venjoneil F. Diasnez
+              </Text>
+              <Text className="text-blue-100 font-medium leading-7">
+                • Ern Basala
+              </Text>
+              <Text className="text-blue-100 font-medium leading-7">
+                • Alvin Anciano
               </Text>
             </View>
           </View>
